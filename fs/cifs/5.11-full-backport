@@ -1,0 +1,262 @@
+5.11 cifs.ko  57,954 LOC.  CIFS version: 2.30
+
+Current stable: 5.11.22 (May 19th).  Includes 29 cifs.ko fixes
+Current mainline 5.15 (October 31th,2022).  59K LOC. CIFS Version 2.33
+(This also includes two additional newer patches)
+
+List of cifs fixes in 5.11.22 Stable kernel
+f1238ba875b1 smb3: do not attempt multichannel to server which does not support it
+398405a688ce smb3: if max_channels set to more than one channel request multichannel
+3dce7356b893 smb3: when mounting with multichannel include it in requested capabilities
+a1f95be1517a smb2: fix use-after-free in smb2_ioctl_query_info()
+e69ceb7d193d cifs: fix regression when mounting shares with prefix paths
+32f21ef504d7 cifs: detect dead connections only when echoes are enabled.
+a69d17010f9c cifs: fix leak in cifs_smb3_do_mount() ctx
+a28b88ac4d6f cifs: fix out-of-bound memory access when calling smb3_notify() at mount point
+f59a9242942f cifs: Return correct error code from smb2_get_enc_key
+9e3516e2ea66 cifs: On cifs_reconnect, resolve the hostname again.
+dc3b0323e723 cifs: escape spaces in share names
+fabd7beaa06c cifs: Silently ignore unknown oplock break handle
+a6c4223bbd4b cifs: revalidate mapping when we open files for SMB1 POSIX
+012597da391a cifs: Adjust key sizes and key generation routines for AES256 encryption
+d6e8a2fa5ee3 smb3: fix cached file size problems in duplicate extents (reflink)
+0ee03a83b396 cifs: change noisy error message to FYI
+14c6e4583490 cifs: ask for more credit on async read/write code paths
+d2c2b04081b5 cifs: Fix preauth hash corruption
+1df0652d1a93 cifs: fix allocation size on newly created files
+e13f3d5f2a92 cifs: warn and fail if trying to use rootfs without the config option
+836238c6998b cifs: do not send close in compound create+close requests
+f8f1613b1581 cifs: return proper error code in statfs(2)
+6e9c30bcbdc8 cifs: fix credit accounting for extra channel
+859ca138ea38 cifs: fix handling of escaped ',' in the password mount argument
+6770207dc509 cifs: fix nodfs mount option
+5fb72729ea1f cifs: introduce helper for finding referral server to improve DFS target resolution
+05c3fe13d121 cifs: check all path components in resolved dfs target
+423f064a786d cifs: fix DFS failover
+f5d4d3c6f651 cifs: Fix inconsistent IS_ERR and PTR_ERR
+
+Patches that had to be modified to include in full backport:
+0069-cifs-make-build_path_from_dentry-return-const-char.patch
+0070-cifs-allocate-buffer-in-the-caller-of-build_path_fro.patch
+0144-cifs-fix-SMB1-error-path-in-cifs_get_file_info_unix.patch
+
+Backport doesn't include:
+0002-namei-make-permission-helpers-idmapped-mount-aware.patch
+0003-attr-handle-idmapped-mounts.patch
+0004-acl-handle-idmapped-mounts.patch
+0005-stat-handle-idmapped-mounts.patch
+0006-fs-make-helpers-idmap-mount-aware.patch
+0035-new-helper-inode_wrong_type.patch
+0042-cifs-have-cifs_fattr_to_inode-refuse-to-change-type-.patch
+0135-cifs-decoding-negTokenInit-with-generic-ASN1-decoder.patch
+0169-cifs-Fix-race-between-hole-punch-and-page-fault.patch
+0193-cifs-remove-support-for-NTLM-and-weaker-authenticati.patch
+0194-cifs-fork-arc4-and-create-a-separate-module-for-it-f.patch
+0195-cifs-create-a-MD4-module-and-switch-cifs.ko-to-use-i.patch
+0196-cifs-cifs_md4-convert-to-SPDX-identifier.patch
+0200-cifs-rename-cifs_common-to-smbfs_common.patch
+0201-cifs-move-SMB-FSCTL-definitions-to-common-code.patch
+
+Patches included (including the 3 modified ones noted above)
+0001-cifs_debug-use-pd-instead-of-messing-with-d_name.patch
+0007-smb3-negotiate-current-dialect-SMB3.1.1-when-version.patch
+0008-cifs-fix-trivial-typo.patch
+0009-cifs-New-optype-for-session-operations.patch
+0010-cifs-Fix-in-error-types-returned-for-out-of-credit-s.patch
+0011-cifs-Identify-a-connection-by-a-conn_id.patch
+0012-cifs-Reformat-DebugData-and-index-connections-by-con.patch
+0013-cifs-Fix-inconsistent-IS_ERR-and-PTR_ERR.patch
+0014-cifs-change-confusing-field-serverName-to-ip_addr.patch
+0015-cifs-clarify-hostname-vs-ip-address-in-proc-fs-cifs-.patch
+0016-cifs-Fix-cifsacl-ACE-mask-for-group-and-others.patch
+0017-cifs-Retain-old-ACEs-when-converting-between-mode-bi.patch
+0018-cifs-Change-SIDs-in-ACEs-while-transferring-file-own.patch
+0019-cifs-cleanup-a-few-le16-vs.-le32-uses-in-cifsacl.c.patch
+0020-TCON-Reconnect-during-STATUS_NETWORK_NAME_DELETED.patch
+0021-cifs-minor-simplification-to-smb2_is_network_name_de.patch
+0022-cifs-If-a-corrupted-DACL-is-returned-by-the-server-b.patch
+0023-cifs-Add-new-mount-parameter-acdirmax-to-allow-cachi.patch
+0024-cifs-convert-revalidate-of-directories-to-using-dire.patch
+0025-cifs-Add-new-parameter-acregmax-for-distinct-file-an.patch
+0026-cifs-fix-handling-of-escaped-in-the-password-mount-a.patch
+0027-cifs-fix-nodfs-mount-option.patch
+0028-cifs-fix-DFS-failover.patch
+0029-cifs-check-all-path-components-in-resolved-dfs-targe.patch
+0030-cifs-introduce-helper-for-finding-referral-server-to.patch
+0031-cifs-use-discard-iterator-to-discard-unneeded-networ.patch
+0032-cifs-update-internal-version-number.patch
+0033-cifs-fix-credit-accounting-for-extra-channel.patch
+0034-cifs-ask-for-more-credit-on-async-read-write-code-pa.patch
+0036-cifs-print-MIDs-in-decimal-notation.patch
+0037-cifs-change-noisy-error-message-to-FYI.patch
+0038-cifs-return-proper-error-code-in-statfs-2.patch
+0039-cifs-do-not-send-close-in-compound-create-close-requ.patch
+0040-do_cifs_create-don-t-set-i_mode-of-something-we-had-.patch
+0041-cifs-have-mkdir-handle-race-with-another-client-sane.patch
+0043-cifs-update-new-ACE-pointer-after-populate_new_aces.patch
+0044-cifs-Fix-preauth-hash-corruption.patch
+0045-fs-cifs-fix-misspellings-using-codespell-tool.patch
+0046-cifs-warn-and-fail-if-trying-to-use-rootfs-without-t.patch
+0047-cifs-fix-allocation-size-on-newly-created-files.patch
+0048-cifs-Adjust-key-sizes-and-key-generation-routines-fo.patch
+0049-cifs-Fix-chmod-with-modefromsid-when-an-older-ACE-al.patch
+0050-cifs-revalidate-mapping-when-we-open-files-for-SMB1-.patch
+0051-cifs-Silently-ignore-unknown-oplock-break-handle.patch
+0052-smb3-fix-cached-file-size-problems-in-duplicate-exte.patch
+0053-cifs-On-cifs_reconnect-resolve-the-hostname-again.patch
+0054-fs-cifs-Remove-unnecessary-struct-declaration.patch
+0055-cifs-escape-spaces-in-share-names.patch
+0056-cifs-Fix-spelling-of-security.patch
+0057-cifs-Remove-useless-variable.patch
+0058-cifs-correct-comments-explaining-internal-semaphore-.patch
+0059-smb3-update-protocol-header-definitions-based-to-inc.patch
+0060-cifs-simplify-SWN-code-with-dummy-funcs-instead-of-i.patch
+0061-fs-cifs-Remove-repeated-struct-declaration.patch
+0062-cifs-cifspdu.h-Replace-one-element-array-with-flexib.patch
+0063-cifs-remove-old-dead-code.patch
+0064-SMB3-update-structures-for-new-compression-protocol-.patch
+0065-cifs-don-t-cargo-cult-strndup.patch
+0066-cifs-constify-get_normalized_path-properly.patch
+0067-cifs-constify-path-argument-of-make_node.patch
+0068-cifs-constify-pathname-arguments-in-a-bunch-of-helpe.patch
+0069-cifs-make-build_path_from_dentry-return-const-char.patch
+0070-cifs-allocate-buffer-in-the-caller-of-build_path_fro.patch
+0071-cifs-switch-build_path_from_dentry-to-using-dentry_p.patch
+0072-cifs-move-the-check-for-nohandlecache-into-open_shro.patch
+0073-cifs-pass-a-path-to-open_shroot-and-check-if-it-is-t.patch
+0074-cifs-rename-the-_shroot-functions-to-_cached_dir.patch
+0075-cifs-store-a-pointer-to-the-root-dentry-in-cifs_sb_i.patch
+0076-cifs-Grab-a-reference-for-the-dentry-of-the-cached-d.patch
+0077-cifs-add-a-function-to-get-a-cached-dir-based-on-its.patch
+0078-cifs-add-a-timestamp-to-track-when-the-lease-of-the-.patch
+0079-cifs-pass-the-dentry-instead-of-the-inode-down-to-th.patch
+0080-cifs-check-the-timestamp-for-the-cached-dirent-when-.patch
+0081-cifs-add-support-for-FALLOC_FL_COLLAPSE_RANGE.patch
+0082-cifs-add-FALLOC_FL_INSERT_RANGE-support.patch
+0083-cifs-make-fs_context-error-logging-wrapper.patch
+0084-cifs-add-fs_context-param-to-parsing-helpers.patch
+0085-cifs-log-mount-errors-using-cifs_errorf.patch
+0086-cifs-export-supported-mount-options-via-new-mount_pa.patch
+0087-smb2-fix-use-after-free-in-smb2_ioctl_query_info.patch
+0088-cifs-fix-out-of-bound-memory-access-when-calling-smb.patch
+0089-cifs-Return-correct-error-code-from-smb2_get_enc_key.patch
+0090-cifs-remove-unnecessary-copies-of-tcon-crfid.fid.patch
+0091-cifs-fix-leak-in-cifs_smb3_do_mount-ctx.patch
+0092-smb3-limit-noisy-error.patch
+0093-smb3-add-rasize-mount-parameter-to-improve-readahead.patch
+0094-cifs-update-internal-version-number.patch
+0095-smb3.1.1-enable-negotiating-stronger-encryption-by-d.patch
+0096-cifs-Deferred-close-for-files.patch
+0097-cifs-add-shutdown-support.patch
+0098-smb3.1.1-allow-dumping-GCM256-keys-to-improve-debugg.patch
+0099-smb3.1.1-allow-dumping-keys-for-multiuser-mounts.patch
+0100-cifs-detect-dead-connections-only-when-echoes-are-en.patch
+0101-cifs-use-echo_interval-even-when-connection-not-read.patch
+0102-cifs-fix-regression-when-mounting-shares-with-prefix.patch
+0103-Cifs-Fix-kernel-oops-caused-by-deferred-close-for-fi.patch
+0104-fs-cifs-Fix-resource-leak.patch
+0105-smb3-when-mounting-with-multichannel-include-it-in-r.patch
+0106-smb3-do-not-attempt-multichannel-to-server-which-doe.patch
+0107-smb3-if-max_channels-set-to-more-than-one-channel-re.patch
+0108-cifs-remove-deadstore-in-cifs_close_all_deferred_fil.patch
+0109-SMB3-incorrect-file-id-in-requests-compounded-with-o.patch
+0110-cifs-fix-memory-leak-in-smb2_copychunk_range.patch
+0111-cifs-Fix-inconsistent-indenting.patch
+0112-Fix-kernel-oops-when-CONFIG_DEBUG_ATOMIC_SLEEP-is-en.patch
+0113-Defer-close-only-when-lease-is-enabled.patch
+0114-Fix-KASAN-identified-use-after-free-issue.patch
+0115-cifs-set-server-cipher_type-to-AES-128-CCM-for-SMB3..patch
+0116-cifs-fix-string-declarations-and-assignments-in-trac.patch
+0117-cifs-change-format-of-CIFS_FULL_KEY_DUMP-ioctl.patch
+0118-cifs-fix-ipv6-formating-in-cifs_ses_add_channel.patch
+0119-cifs-remove-duplicated-prototype.patch
+0120-cifs-Remove-unused-inline-function-is_sysvol_or_netl.patch
+0121-cifs-Constify-static-struct-genl_ops.patch
+0122-cifs-remove-redundant-initialization-of-variable-rc.patch
+0123-cifs-fix-doc-warnings-in-cifs_dfs_ref.c.patch
+0124-cifs-improve-fallocate-emulation.patch
+0125-cifs-do-not-send-tree-disconnect-to-ipc-shares.patch
+0126-cifs-get-rid-of-noreq-param-in-__dfs_cache_find.patch
+0127-cifs-keep-referral-server-sessions-alive.patch
+0128-cifs-handle-different-charsets-in-dfs-cache.patch
+0129-cifs-fix-path-comparison-and-hash-calc.patch
+0130-cifs-set-a-minimum-of-2-minutes-for-refreshing-dfs-c.patch
+0131-cifs-do-not-share-tcp-servers-with-dfs-mounts.patch
+0132-cifs-missed-ref-counting-smb-session-in-find.patch
+0133-cifs-enable-extended-stats-by-default.patch
+0134-cifs-avoid-starvation-when-refreshing-dfs-cache.patch
+0136-cifs-fix-check-of-dfs-interlinks.patch
+0137-cifs-retry-lookup-and-readdir-when-EAGAIN-is-returne.patch
+0138-cifs-avoid-extra-calls-in-posix_info_parse.patch
+0139-cifs-convert-list_for_each-to-entry-variant-in-smb2m.patch
+0140-cifs-convert-list_for_each-to-entry-variant-in-cifs_.patch
+0141-cifs-use-SPDX-Licence-Identifier.patch
+0142-cifs-fix-unneeded-null-check.patch
+0143-smb3-fix-uninitialized-value-for-port-in-witness-pro.patch
+0144-cifs-fix-SMB1-error-path-in-cifs_get_file_info_unix.patch
+0145-smb311-remove-dead-code-for-non-compounded-posix-que.patch
+0146-cifs-Avoid-field-over-reading-memcpy.patch
+0147-smbdirect-missing-rc-checks-while-waiting-for-rdma-e.patch
+0148-cifs-fix-NULL-dereference-in-smb2_check_message.patch
+0149-SMB3-Add-new-info-level-for-query-directory.patch
+0150-cifs-remove-two-cases-where-rc-is-set-unnecessarily-.patch
+0151-cifs-missing-null-check-for-newinode-pointer.patch
+0152-smb3-fix-possible-access-to-uninitialized-pointer-to.patch
+0153-cifs-missing-null-pointer-check-in-cifs_mount.patch
+0154-cifs-fix-missing-spinlock-around-update-to-ses-statu.patch
+0155-smb3-prevent-races-updating-CurrentMid.patch
+0156-cifs-make-locking-consistent-around-the-server-sessi.patch
+0157-cifs-clarify-SMB1-code-for-UnixCreateHardLink.patch
+0158-CIFS-Clarify-SMB1-code-for-UnixCreateSymLink.patch
+0159-CIFS-Clarify-SMB1-code-for-UnixSetPathInfo.patch
+0160-smb3-fix-typo-in-header-file.patch
+0161-CIFS-Clarify-SMB1-code-for-SetFileSize.patch
+0162-CIFS-Clarify-SMB1-code-for-delete.patch
+0163-CIFS-Clarify-SMB1-code-for-rename-open-file.patch
+0164-CIFS-Clarify-SMB1-code-for-POSIX-Lock.patch
+0165-cifs-use-helpers-when-parsing-uid-gid-mount-options-.patch
+0166-SMB3.1.1-Add-support-for-negotiating-signing-algorit.patch
+0167-cifs-prevent-NULL-deref-in-cifs_compose_mount_option.patch
+0168-cifs-update-internal-version-number.patch
+0170-cifs-use-the-expiry-output-of-dns_query-to-schedule-.patch
+0171-cifs-Do-not-use-the-original-cruid-when-following-DF.patch
+0172-cifs-fix-the-out-of-range-assignment-to-bit-fields-i.patch
+0173-cifs-handle-reconnect-of-tcon-when-there-is-no-cache.patch
+0174-cifs-fix-missing-null-session-check-in-mount.patch
+0175-cifs-added-WARN_ON-for-all-the-count-decrements.patch
+0176-SMB3.1.1-fix-mount-failure-to-some-servers-when-comp.patch
+0177-cifs-do-not-share-tcp-sessions-of-dfs-connections.patch
+0178-cifs-only-write-64kb-at-a-time-when-fallocating-a-sm.patch
+0179-cifs-support-share-failover-when-remounting.patch
+0180-CIFS-Clarify-SMB1-code-for-POSIX-Create.patch
+0181-CIFS-Clarify-SMB1-code-for-POSIX-delete-file.patch
+0182-cifs-fix-fallocate-when-trying-to-allocate-a-hole.patch
+0183-SMB3-fix-readpage-for-large-swap-cache.patch
+0184-smb3-rc-uninitialized-in-one-fallocate-path.patch
+0185-cifs-add-missing-parsing-of-backupuid.patch
+0186-cifs-create-sd-context-must-be-a-multiple-of-8.patch
+0187-cifs-use-the-correct-max-length-for-dentry_path_raw.patch
+0186a-cifs-fix-signed-integer-overflow-when-fl_end-is-OFFS.patch
+0186b-cifs-avoid-signed-integer-overflow-in-calculating-bl.patch
+0188-cifs-Handle-race-conditions-during-rename.patch
+0189-cifs-Call-close-synchronously-during-unlink-rename-l.patch
+0190-CIFS-Fix-a-potencially-linear-read-overflow.patch
+0191-cifs-fix-wrong-release-in-sess_alloc_buffer-failed-p.patch
+0192-smb3-fix-posix-extensions-mount-option.patch
+0193-cifs-enable-fscache-usage-even-for-files-opened-as-r.patch
+0198-cifs-Do-not-leak-EDEADLK-to-dgetents64-for-STATUS_US.patch
+0199-cifs-update-FSCTL-definitions.patch
+0202-cifs-properly-invalidate-cached-root-handle-when-clo.patch
+0203-cifs-remove-pathname-for-file-from-SPDX-header.patch
+0204-cifs-fix-incorrect-kernel-doc-comments.patch
+0205-cifs-Deferred-close-performance-improvements.patch
+0206-cifs-Fix-soft-lockup-during-fsstress.patch
+0207-cifs-Not-to-defer-close-on-file-when-lock-is-set.patch
+0208-cifs-fix-a-sign-extension-bug.patch
+0209-cifs-Deal-with-some-warnings-from-W-1.patch
+0210-cifs-Clear-modified-attribute-bit-from-inode-flags.patch
+0211-smb3-correct-smb3-ACL-security-descriptor.patch
+0212-smb3-correct-server-pointer-dereferencing-check-to-b.patch
+0213-cifs-fix-incorrect-check-for-null-pointer-in-header_.patch
+0214-cifs-To-match-file-servers-make-sure-the-server-host.patch
+0215-cifs-add-mount-parameter-tcpnodelay.patch
