@@ -76,8 +76,6 @@ err:
 	return rc;
 }
 
-
-static
 int smb2_get_sign_key(__u64 ses_id, struct TCP_Server_Info *server, u8 *key)
 {
 	struct cifs_chan *chan;
@@ -542,8 +540,8 @@ generate_smb311signingkey(struct cifs_ses *ses,
 }
 
 int
-smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server,
-			bool allocate_crypto)
+smb3_calc_aes_cmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
+		   bool allocate_crypto)
 {
 	int rc;
 	unsigned char smb3_signature[SMB2_CMACAES_SIZE];
@@ -625,7 +623,6 @@ out:
 static int
 smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 {
-	int rc = 0;
 	struct smb2_hdr *shdr;
 	struct smb2_sess_setup_req *ssr;
 	bool is_binding;
@@ -652,9 +649,7 @@ smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 		return 0;
 	}
 
-	rc = server->ops->calc_signature(rqst, server, false);
-
-	return rc;
+	return server->ops->calc_signature(rqst, server, false);
 }
 
 int
@@ -668,6 +663,8 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	if ((shdr->Command == SMB2_NEGOTIATE) ||
 	    (shdr->Command == SMB2_SESSION_SETUP) ||
 	    (shdr->Command == SMB2_OPLOCK_BREAK) ||
+	    (shdr->MessageId == 0xFFFFFFFFFFFFFFFF) || /* MS-SMB2 3.2.5.1.3 */
+	    (shdr->Status == STATUS_PENDING) || /* MS-SMB2 3.2.5.1.3 */
 	    server->ignore_signature ||
 	    (!server->session_estab))
 		return 0;
@@ -677,30 +674,25 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	 * server does not send one? BB
 	 */
 
-	/* Do not need to verify session setups with signature "BSRSPYL " */
-	if (memcmp(shdr->Signature, "BSRSPYL ", 8) == 0)
-		cifs_dbg(FYI, "dummy signature received for smb command 0x%x\n",
-			 shdr->Command);
-
 	/*
 	 * Save off the origiginal signature so we can modify the smb and check
 	 * our calculated signature against what the server sent.
 	 */
 	memcpy(server_response_sig, shdr->Signature, SMB2_SIGNATURE_SIZE);
 
-	memset(shdr->Signature, 0, SMB2_SIGNATURE_SIZE);
-
+	/*
+	 * all implementations of ->calc_signature() will zero shdr->Signature
+	 * before computing it
+	 */
 	rc = server->ops->calc_signature(rqst, server, true);
-
 	if (rc)
 		return rc;
 
-	if (memcmp(server_response_sig, shdr->Signature, SMB2_SIGNATURE_SIZE)) {
-		cifs_dbg(VFS, "sign fail cmd 0x%x message id 0x%llx\n",
-			shdr->Command, shdr->MessageId);
+	/* On mismatch, an error message is printed in smb2_check_receive() */
+	if (memcmp(server_response_sig, shdr->Signature, SMB2_SIGNATURE_SIZE))
 		return -EACCES;
-	} else
-		return 0;
+
+	return 0;
 }
 
 /*
@@ -828,9 +820,13 @@ smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 		int rc;
 
 		rc = smb2_verify_signature(&rqst, server);
-		if (rc)
-			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
-				 rc);
+		if (rc) {
+			struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
+
+			cifs_server_dbg(VFS, "SMB signature verification for MessageId 0x%llx "
+					     "(Command 0x%x) failed, rc=%d\n",
+					     shdr->MessageId, shdr->Command, rc);
+		}
 	}
 
 	return map_smb2_to_linux_error(mid->resp_buf, log_error);
@@ -843,7 +839,23 @@ smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	int rc;
 	struct smb2_hdr *shdr =
 			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
+	struct smb2_transform_hdr *trhdr =
+			(struct smb2_transform_hdr *)rqst->rq_iov[0].iov_base;
 	struct mid_q_entry *mid;
+	bool is_encrypted;
+
+	/*
+	 * Client must not sign the request is encrypted.
+	 *
+	 * Note: we can't rely on SMB2_SESSION_FLAG_ENCRYPT_DATA or
+	 * SMB2_GLOBAL_CAP_ENCRYPTION here because they might be set, but not
+	 * being actively used (e.g. not mounted with "seal"). So we just check
+	 * if the request header is a transform header.
+	 *
+	 * References:
+	 * MS-SMB2 3.2.4.1.1
+	 */
+	is_encrypted = (trhdr->ProtocolId == SMB2_TRANSFORM_PROTO_NUM);
 
 	smb2_seq_num_into_buf(server, shdr);
 
@@ -853,11 +865,13 @@ smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		return ERR_PTR(rc);
 	}
 
-	rc = smb2_sign_rqst(rqst, server);
-	if (rc) {
-		revert_current_mid_from_hdr(server, shdr);
-		delete_mid(mid);
-		return ERR_PTR(rc);
+	if (!is_encrypted) {
+		rc = smb2_sign_rqst(rqst, server);
+		if (rc) {
+			revert_current_mid_from_hdr(server, shdr);
+			delete_mid(mid);
+			return ERR_PTR(rc);
+		}
 	}
 
 	return mid;
@@ -895,6 +909,31 @@ smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 	}
 
 	return mid;
+}
+
+int smb311_aes_gmac_alloc(struct crypto_aead **tfm)
+{
+	int rc = 0;
+
+	if (!tfm)
+		return -EIO;
+
+	/*
+	 * This is unlikely as we only call this once per TCP session in
+	 * decode_signing_ctx().
+	 */
+	if (unlikely(*tfm))
+		return rc;
+
+	*tfm = crypto_alloc_aead("gcm(aes)", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(*tfm)) {
+		rc = PTR_ERR(*tfm);
+
+		cifs_dbg(VFS, "%s: Failed to alloc AES-GMAC AEAD, rc=%d\n", __func__, rc);
+		*tfm = NULL;
+	}
+
+	return rc;
 }
 
 int
