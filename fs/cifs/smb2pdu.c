@@ -614,13 +614,17 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 		neg_context_count++;
 	}
 
-	if (enable_negotiate_signing) {
-		ctxt_len = build_signing_ctxt((struct smb2_signing_capabilities *)
-				pneg_ctxt);
-		*total_len += ctxt_len;
-		pneg_ctxt += ctxt_len;
-		neg_context_count++;
+	if (!enable_negotiate_signing) {
+		pr_warn("cifs.ko loaded with param 'enable_negotiate_signing=0', but this parameter "
+			"is deprecated. Trying to negotiate signing capabilities anyway...");
+		enable_negotiate_signing = true;
 	}
+
+	ctxt_len = build_signing_ctxt((struct smb2_signing_capabilities *)
+			pneg_ctxt);
+	*total_len += ctxt_len;
+	pneg_ctxt += ctxt_len;
+	neg_context_count++;
 
 	/* check for and add transport_capabilities and signing capabilities */
 	req->NegotiateContextCount = cpu_to_le16(neg_context_count);
@@ -833,8 +837,7 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 	}
 
 	/*
-	 * Throw a warning if user requested signing to be negotiated, but it
-	 * wasn't.
+	 * Throw a warning if signing context was not negotiated.
 	 *
 	 * Some servers will not send a SMB2_SIGNING_CAPABILITIES context (*),
 	 * so we use AES-CMAC (default in smb311 ops) as it is expected to be
@@ -842,7 +845,7 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 	 *
 	 * (*) see note "<125> Section 3.2.4.2.2.2" in MS-SMB2
 	 */
-	if (!server->signing_negotiated && enable_negotiate_signing)
+	if (!server->signing_negotiated)
 		cifs_dbg(VFS, "signing capabilities were not negotiated, using "
 			 "AES-CMAC for message signing\n");
 
