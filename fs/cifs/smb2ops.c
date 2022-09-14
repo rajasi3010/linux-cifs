@@ -4663,11 +4663,11 @@ static int smb311_aes_gmac_nonce(struct smb2_hdr *shdr, bool is_server,
 
 	/* request is coming from the server, set LSB */
 	if (is_server)
-		nonce.role |= cpu_to_le32(1);
+		nonce.role |= 1UL << 0;
 
 	/* set penultimate LSB if SMB2_CANCEL command */
 	if (shdr->Command == SMB2_CANCEL)
-		nonce.role |= cpu_to_le32(1UL << 1);
+		nonce.role |= 1UL << 1;
 
 	memcpy(*out_nonce, (u8 *)&nonce, SMB3_AES_GCM_NONCE);
 

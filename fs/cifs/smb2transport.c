@@ -663,7 +663,7 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	if ((shdr->Command == SMB2_NEGOTIATE) ||
 	    (shdr->Command == SMB2_SESSION_SETUP) ||
 	    (shdr->Command == SMB2_OPLOCK_BREAK) ||
-	    (shdr->MessageId == U64_MAX) || /* MS-SMB2 3.2.5.1.3 */
+	    (shdr->MessageId == 0xFFFFFFFFFFFFFFFF) || /* MS-SMB2 3.2.5.1.3 */
 	    (shdr->Status == STATUS_PENDING) || /* MS-SMB2 3.2.5.1.3 */
 	    server->ignore_signature ||
 	    (!server->session_estab))
