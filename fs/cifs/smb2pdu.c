@@ -460,7 +460,7 @@ static unsigned int
 build_signing_ctxt(struct smb2_signing_capabilities *pneg_ctxt)
 {
 	unsigned int ctxt_len = sizeof(struct smb2_signing_capabilities);
-	unsigned short num_algs = 1; /* number of signing algorithms sent */
+	unsigned short num_algs = 2; /* number of signing algorithms sent */
 
 	pneg_ctxt->ContextType = SMB2_SIGNING_CAPABILITIES;
 	/*
@@ -469,14 +469,25 @@ build_signing_ctxt(struct smb2_signing_capabilities *pneg_ctxt)
 	pneg_ctxt->DataLength = cpu_to_le16(DIV_ROUND_UP(
 				sizeof(struct smb2_signing_capabilities) -
 				sizeof(struct smb2_neg_context) +
-				(num_algs * 2 /* sizeof u16 */), 8) * 8);
+				(num_algs * sizeof(u16)), 8) * 8);
 	pneg_ctxt->SigningAlgorithmCount = cpu_to_le16(num_algs);
-	pneg_ctxt->SigningAlgorithms[0] = cpu_to_le16(SIGNING_ALG_AES_CMAC);
 
-	ctxt_len += 2 /* sizeof le16 */ * num_algs;
+	/*
+	 * MS-SMB2 2.2.3.1.7:
+	 * These IDs MUST be in an order such that the most preferred
+	 * signing algorithm MUST be at the beginning of the array and least
+	 * preferred signing algorithm at the end of the array.
+	 *
+	 * Hint the server that we prefer AES-GMAC, but there's no guarantee
+	 * it'll be used, e.g. server might not support it.
+	 */
+	pneg_ctxt->SigningAlgorithms[0] = SIGNING_ALG_AES_GMAC_LE;
+	pneg_ctxt->SigningAlgorithms[1] = SIGNING_ALG_AES_CMAC_LE;
+	/* SMB 3.1.1 doesn't accept HMAC-SHA256, so no need to send it */
+
+	ctxt_len += sizeof(__le16) * num_algs;
 	ctxt_len = DIV_ROUND_UP(ctxt_len, 8) * 8;
 	return ctxt_len;
-	/* TBD add SIGNING_ALG_AES_GMAC and/or SIGNING_ALG_HMAC_SHA256 */
 }
 
 static void
@@ -613,7 +624,6 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 
 	/* check for and add transport_capabilities and signing capabilities */
 	req->NegotiateContextCount = cpu_to_le16(neg_context_count);
-
 }
 
 static void decode_preauth_context(struct smb2_preauth_neg_context *ctxt)
@@ -702,30 +712,64 @@ static int decode_encrypt_ctx(struct TCP_Server_Info *server,
 	return 0;
 }
 
-static void decode_signing_ctx(struct TCP_Server_Info *server,
-			       struct smb2_signing_capabilities *pctxt)
+/* XXX: maybe move this somewhere else? */
+static const char *smb3_signing_algo_str(u16 algo)
+{
+	switch (algo) {
+	case SIGNING_ALG_AES_CMAC: return "AES-CMAC";
+	case SIGNING_ALG_AES_GMAC: return "AES-GMAC";
+	/* HMAC-SHA256 is unused in SMB3+ context */
+	default: return "unknown";
+	}
+}
+
+static int decode_signing_ctx(struct TCP_Server_Info *server,
+			      struct smb2_signing_capabilities *pctxt)
 {
 	unsigned int len = le16_to_cpu(pctxt->DataLength);
 
 	if ((len < 4) || (len > 16)) {
-		pr_warn_once("server sent bad signing negcontext\n");
-		return;
+		pr_warn_once("server sent bad signing negcontext, len=%u\n", len);
+		return -EINVAL;
 	}
+
 	if (le16_to_cpu(pctxt->SigningAlgorithmCount) != 1) {
-		pr_warn_once("Invalid signing algorithm count\n");
-		return;
+		pr_warn_once("invalid signing algorithm count '%u'\n",
+			     le16_to_cpu(pctxt->SigningAlgorithmCount));
+		return -EINVAL;
 	}
-	if (le16_to_cpu(pctxt->SigningAlgorithms[0]) > 2) {
-		pr_warn_once("unknown signing algorithm\n");
-		return;
+
+	if (le16_to_cpu(pctxt->SigningAlgorithms[0]) > SIGNING_ALG_AES_GMAC) {
+		pr_warn_once("unknown signing algorithm '%u'\n",
+			     le16_to_cpu(pctxt->SigningAlgorithms[0]));
+		return -EINVAL;
 	}
 
 	server->signing_negotiated = true;
 	server->signing_algorithm = le16_to_cpu(pctxt->SigningAlgorithms[0]);
-	cifs_dbg(FYI, "signing algorithm %d chosen\n",
-		     server->signing_algorithm);
-}
 
+	/* AES-CMAC is already the default, in case AES-GMAC wasn't negotiated */
+	if (server->signing_algorithm == SIGNING_ALG_AES_GMAC) {
+		int rc = 0;
+
+		/*
+		 * Allocate the TFM here since we now know that both and server supports AES-GMAC
+		 *
+		 * XXX: If allocation fails, maybe we could retry negotiation without AES-GMAC in
+		 * the dialects array?
+		 */
+		rc = smb311_aes_gmac_alloc(&server->secmech.aes_gmac);
+		if (rc)
+			return rc;
+
+		server->ops->calc_signature = smb311_calc_aes_gmac;
+	}
+
+	cifs_dbg(FYI, "negotiated signing algorithm '%s'\n",
+		 smb3_signing_algo_str(server->signing_algorithm));
+
+	return 0;
+}
 
 static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 				     struct TCP_Server_Info *server,
@@ -744,6 +788,9 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 	}
 
 	len_of_ctxts = len_of_smb - offset;
+
+	/* ensure this is false before decoding */
+	server->signing_negotiated = false;
 
 	for (i = 0; i < ctxt_cnt; i++) {
 		int clen;
@@ -771,8 +818,8 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 		else if (pctx->ContextType == SMB2_POSIX_EXTENSIONS_AVAILABLE)
 			server->posix_ext_supported = true;
 		else if (pctx->ContextType == SMB2_SIGNING_CAPABILITIES)
-			decode_signing_ctx(server,
-				(struct smb2_signing_capabilities *)pctx);
+			rc = decode_signing_ctx(server,
+					(struct smb2_signing_capabilities *)pctx);
 		else
 			cifs_server_dbg(VFS, "unknown negcontext of type %d ignored\n",
 				le16_to_cpu(pctx->ContextType));
@@ -784,6 +831,21 @@ static int smb311_decode_neg_context(struct smb2_negotiate_rsp *rsp,
 		offset += clen + sizeof(struct smb2_neg_context);
 		len_of_ctxts -= clen;
 	}
+
+	/*
+	 * Throw a warning if user requested signing to be negotiated, but it
+	 * wasn't.
+	 *
+	 * Some servers will not send a SMB2_SIGNING_CAPABILITIES context (*),
+	 * so we use AES-CMAC (default in smb311 ops) as it is expected to be
+	 * accepted (e.g. only Windows Server 2022 supports AES-GMAC)
+	 *
+	 * (*) see note "<125> Section 3.2.4.2.2.2" in MS-SMB2
+	 */
+	if (!server->signing_negotiated && enable_negotiate_signing)
+		cifs_dbg(VFS, "signing capabilities were not negotiated, using "
+			 "AES-CMAC for message signing\n");
+
 	return rc;
 }
 
@@ -930,6 +992,15 @@ SMB2_negotiate(const unsigned int xid,
 	req->Capabilities = cpu_to_le32(server->vals->req_capabilities);
 	if (ses->chan_max > 1)
 		req->Capabilities |= cpu_to_le32(SMB2_GLOBAL_CAP_MULTI_CHANNEL);
+
+	/* set default settings for signing */
+	if (server->vals->protocol_id >= SMB30_PROT_ID) {
+		server->signing_algorithm = SIGNING_ALG_AES_CMAC;
+		server->ops->calc_signature = smb3_calc_aes_cmac;
+	} else if (server->vals->protocol_id >= SMB20_PROT_ID) {
+		server->signing_algorithm = SIGNING_ALG_HMAC_SHA256;
+		/* ->calc_signature is already set to smb2_calc_signature */
+	}
 
 	/* ClientGUID must be zero for SMB2.02 dialect */
 	if (server->vals->protocol_id == SMB20_PROT_ID)
@@ -1080,11 +1151,15 @@ SMB2_negotiate(const unsigned int xid,
 	}
 
 	if (rsp->DialectRevision == cpu_to_le16(SMB311_PROT_ID)) {
-		if (rsp->NegotiateContextCount)
+		if (rsp->NegotiateContextCount) {
 			rc = smb311_decode_neg_context(rsp, server,
 						       rsp_iov.iov_len);
-		else
+		} else {
 			cifs_server_dbg(VFS, "Missing expected negotiate contexts\n");
+			cifs_server_dbg(VFS, "Using default signing algorithm (AES-CMAC)\n");
+			server->signing_algorithm = SIGNING_ALG_AES_CMAC;
+			server->ops->calc_signature = smb3_calc_aes_cmac;
+		}
 	}
 neg_exit:
 	free_rsp_buf(resp_buftype, rsp);
@@ -1389,8 +1464,7 @@ SMB2_sess_establish_session(struct SMB2_sess_data *sess_data)
 	if (server->ops->generate_signingkey) {
 		rc = server->ops->generate_signingkey(ses, server);
 		if (rc) {
-			cifs_dbg(FYI,
-				"SMB3 session key generation failed\n");
+			cifs_dbg(FYI, "SMB3 session key generation failed\n");
 			cifs_server_unlock(server);
 			return rc;
 		}

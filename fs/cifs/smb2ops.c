@@ -12,6 +12,7 @@
 #include <linux/uuid.h>
 #include <linux/sort.h>
 #include <crypto/aead.h>
+#include <crypto/gcm.h>
 #include <linux/fiemap.h>
 #include <uapi/linux/magic.h>
 #include "cifsfs.h"
@@ -5471,7 +5472,7 @@ struct smb_version_operations smb30_operations = {
 	.set_lease_key = smb2_set_lease_key,
 	.new_lease_key = smb2_new_lease_key,
 	.generate_signingkey = generate_smb30signingkey,
-	.calc_signature = smb3_calc_signature,
+	.calc_signature = smb3_calc_aes_cmac,
 	.set_integrity  = smb3_set_integrity,
 	.is_read_op = smb21_is_read_op,
 	.set_oplock_level = smb3_set_oplock_level,
@@ -5585,7 +5586,11 @@ struct smb_version_operations smb311_operations = {
 	.set_lease_key = smb2_set_lease_key,
 	.new_lease_key = smb2_new_lease_key,
 	.generate_signingkey = generate_smb311signingkey,
-	.calc_signature = smb3_calc_signature,
+	/*
+	 * .calc_signature is replaced by smb311_calc_aes_gmac if AES-GMAC
+	 * gets negotiated with the server.
+	 */
+	.calc_signature = smb3_calc_aes_cmac,
 	.set_integrity  = smb3_set_integrity,
 	.is_read_op = smb21_is_read_op,
 	.set_oplock_level = smb3_set_oplock_level,

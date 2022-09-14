@@ -14,6 +14,7 @@
 
 struct statfs;
 struct smb_rqst;
+struct crypto_aead;
 
 /*
  *****************************************************************
@@ -37,6 +38,7 @@ extern struct mid_q_entry *smb2_setup_request(struct cifs_ses *ses,
 					      struct smb_rqst *rqst);
 extern struct mid_q_entry *smb2_setup_async_request(
 			struct TCP_Server_Info *server, struct smb_rqst *rqst);
+extern int smb311_aes_gmac_alloc(struct crypto_aead **);
 extern struct cifs_ses *smb2_find_smb_ses(struct TCP_Server_Info *server,
 					   __u64 ses_id);
 extern struct cifs_tcon *smb2_find_smb_tcon(struct TCP_Server_Info *server,
@@ -44,9 +46,12 @@ extern struct cifs_tcon *smb2_find_smb_tcon(struct TCP_Server_Info *server,
 extern int smb2_calc_signature(struct smb_rqst *rqst,
 				struct TCP_Server_Info *server,
 				bool allocate_crypto);
-extern int smb3_calc_signature(struct smb_rqst *rqst,
+extern int smb3_calc_aes_cmac(struct smb_rqst *rqst,
+			      struct TCP_Server_Info *server,
+			      bool allocate_crypto);
+extern int smb311_calc_aes_gmac(struct smb_rqst *rqst,
 				struct TCP_Server_Info *server,
-				bool allocate_crypto);
+				bool alloc);
 extern void smb2_echo_request(struct work_struct *work);
 extern __le32 smb2_get_lease_state(struct cifsInodeInfo *cinode);
 extern bool smb2_is_valid_oplock_break(char *buffer,
@@ -268,6 +273,7 @@ extern void smb2_copy_fs_info_to_kstatfs(
 	 struct smb2_fs_full_size_info *pfs_inf,
 	 struct kstatfs *kst);
 extern int smb311_crypto_shash_allocate(struct TCP_Server_Info *server);
+extern int smb2_get_sign_key(__u64, struct TCP_Server_Info *, u8 *);
 extern int smb311_update_preauth_hash(struct cifs_ses *ses,
 				      struct TCP_Server_Info *server,
 				      struct kvec *iov, int nvec);

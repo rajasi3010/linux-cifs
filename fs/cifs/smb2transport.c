@@ -542,8 +542,8 @@ generate_smb311signingkey(struct cifs_ses *ses,
 }
 
 int
-smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server,
-			bool allocate_crypto)
+smb3_calc_aes_cmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
+		   bool allocate_crypto)
 {
 	int rc;
 	unsigned char smb3_signature[SMB2_CMACAES_SIZE];
@@ -621,6 +621,323 @@ out:
 	return rc;
 }
 
+/*
+ * Initialize a scatterlist for encrypt/decrypt/sign (AES-GMAC) operations
+ *
+ * @num_rqst: Number of requests that will be transformed. Note that this is always 1 for AES-GMAC
+ *	      signing.
+ * @rqst: Points to the first request to be transformed. Note that this is always a single request
+ *	  for AES-GMAC signing, that might contain 1 or more iovs.
+ * @sig: Points to a caller-allocated buffer that will hold the computed signature.
+ * @crypt: If true, indicates that this SG list is for a encryption/decryption transform. If false,
+ *	   this is an AES-GMAC signing operation. See 'skip' variable.
+ *
+ * General notes for callers:
+ *
+ * - The crypto API fully supports using the same SG list for encrypt/decrypt operations,i.e. it
+ *   encrypts/decrypts the plain/cipher text in src SG and then copies the result into dst SG,
+ *   where src == dst. The AAD buffer are should not be modified
+ * - If it's desired to use 2 different SGs, one for src, another for dst, make sure they have the
+ *   same layout, and same AAD/text/signature sizes
+ * - It's ok to have a hole/pad in the SG, if required, but make sure to account for its size when
+ *   setting crypt len/AAD len. Also, there should be no NULL buffers. init_sg() checks for that
+ *   when looping through the iovs, and will return ERR_PTR(-EIO) in case a NULL iov is found.
+ *
+ * Notes for encrypt/decrypt:
+ *
+ * - Assumes the first rqst has a transform header as the first iov, i.e.:
+ *   - rqst[0].rq_iov[0]: Transform header. The first 20 bytes of the transform header are not
+ *     part of the encrypted blob (see 'skip' variable)
+ *   - rqst[0].rq_iov[1+]: Data to be encrypted/decrypted
+ *   - rqst[1+].rq_iov[0+]: Data to be encrypted/decrypted
+ *
+ * Notes for AES-GMAC signing:
+ *
+ * - @num_rqst is always 1
+ *   - 'skip' variable must be 0 (rqst[0].rq_iov[0] is smb2_hdr already)
+ *   - The memory layout is slightly different from encrypt/decrypt:
+ *     crypt: [ AAD (20 bytes) | plain/cipher text (iovs, variable length) | signature buffer (16 bytes) ]
+ *     sign: [ AAD (iovs, variable length) | empty plaintext (0 bytes, not NULL) | signature buffer (16 bytes) ]
+ *
+ * Return: On success, returns an SG filled with the iovs from @rqst. On
+ *	   failure, returns ERR_PTR(errno).
+ */
+static struct scatterlist *init_sg_gmac(int num_rqst, struct smb_rqst *rqst, u8 *sig)
+{
+	unsigned int sg_len;
+	struct scatterlist *sg;
+	unsigned int i, j, idx = 0;
+
+	sg_len = 1;
+	for (i = 0; i < num_rqst; i++)
+		sg_len += rqst[i].rq_nvec + rqst[i].rq_npages;
+
+	sg = kmalloc_array(sg_len, sizeof(struct scatterlist), GFP_KERNEL);
+	if (!sg)
+		return ERR_PTR(-ENOMEM);
+
+	sg_init_table(sg, sg_len);
+
+	/*
+	 * initializes the plain/cipher text buffers for encrypt/decrypt, or
+	 * the AAD area for signing
+	 */
+	for (i = 0; i < num_rqst; i++) {
+		for (j = 0; j < rqst[i].rq_nvec; j++) {
+			if (unlikely(!rqst[i].rq_iov[j].iov_base))
+				return ERR_PTR(-EIO);
+
+			smb2_sg_set_buf(&sg[idx++],
+					rqst[i].rq_iov[j].iov_base,
+					rqst[i].rq_iov[j].iov_len);
+		}
+
+		for (j = 0; j < rqst[i].rq_npages; j++) {
+			unsigned int len, offset;
+			void *kaddr = NULL;
+
+			rqst_page_get_length(&rqst[i], j, &len, &offset);
+			kaddr = kmap(rqst->rq_pages[i]) + offset;
+
+			if (kaddr)
+				/* no need to use smb2_sg_set_buf() here */
+				sg_set_buf(&sg[idx++], kaddr, len);
+			else
+				sg_set_page(&sg[idx++], rqst[i].rq_pages[j], len, offset);
+
+			kunmap(rqst->rq_pages[i]);
+		}
+	}
+
+	/* initialize signature buffer */
+	smb2_sg_set_buf(&sg[idx], sig, SMB2_SIGNATURE_SIZE);
+
+	return sg;
+}
+
+/**
+ * smb311_crypt_sign() - Encrypts, decrypts, or sign an SMB2 message using AES-GCM algorithm.
+ *
+ * @rqst: SMB2 request to transform.
+ * @num_rqst: Number of requests to transform.  Must be 1 if @sign_only is true.
+ * @enc: True for an encryption operation, false for decryption.  If both @enc and @sign_only are
+ *	 true, assumes an encryption operation and set @sign_only to false.
+ * @sign_only: True if the request must only have the signature computed.
+ * @tfm: AES-GCM crypto transformation object.  Must be allocated and freed by the caller.
+ * @key: The private key to be used for the operation.  Must be allocated and freed by the caller.
+ * @keylen: The size of @key.  Must be 16 for AES-128-GCM crypt ops and AES-GMAC, or 32 for
+ *	    AES-256-GCM.
+ * @iv: The Initialization Vector, a.k.a. nonce.  Must be allocated and freed by the caller.
+ * @assoclen: Size of the Additional Authenticated Data (AAD) (or Associated Data (AD)).  Must be
+ *	      size of smb2_transform_hdr - 20 for encryption/decryption, and the size of the whole
+ *	      SMB2 message for signing (e.g gotten from smb_rqst_len()).
+ * @cryptlen: Size of the plain/cipher text buffer.  Must be 0 if @sign_only is true.
+ *
+ * This function is shared between the SMB 3.1.1 AES-GCM encryption/decryption operations
+ * (crypt_message()), and AES-GMAC signing operation (smb311_calc_aes_gmac()).
+ *
+ * This function will perform the core operations (encrypt and decrypt) using the parameters passed
+ * by the callers, which is what differ encrypt/decrypt ops from signing ops.
+ *
+ * Note that signing functionality (@sign_only == true) must only be used when the request must NOT
+ * be encrypted, as encrypted requests will have their own signatures, but computed differently.
+ *
+ * References:
+ * MS-SMB2 3.2.4.1.1 "Signing the Message"
+ *
+ * Return: 0 on success, negative errno otherwise.
+ */
+static int smb311_gmac_sign(struct smb_rqst *rqst, int num_rqst,
+			    struct crypto_aead *tfm,
+			    const u8 *key, unsigned int keylen,
+			    u8 *iv)
+{
+	struct smb2_hdr *shdr = (struct smb2_hdr *)rqst[0].rq_iov[0].iov_base;
+	u8 sig[SMB2_SIGNATURE_SIZE] = { 0 };
+	unsigned long assoclen;
+	struct aead_request *aead_req;
+	DECLARE_CRYPTO_WAIT(wait);
+	struct scatterlist *sg;
+	int rc = 0;
+
+	/* basic checks */
+	if (!rqst || !tfm || !key || !iv)
+		return -EINVAL;
+
+	if (unlikely(!rqst))
+		return -ENODATA;
+
+	/* signing is done on single requests only */
+	if (num_rqst > 1) {
+		cifs_dbg(VFS, "%s: invalid number of requests to sign '%u', expected 1\n",
+			 __func__, num_rqst);
+		return -EINVAL;
+	}
+
+	/*
+	 * Set the Additional Authenticated Data (AAD)/Associated Data (AD) length to the SMB
+	 * request length, which corresponds to the part of the buffer we want to sign/authenticate.
+	 */
+	assoclen = smb_rqst_len(server, rqst);
+	if (unlikely(assoclen == 0)) {
+		cifs_dbg(FYI, "%s: assoclen is 0 for signing operation\n", __func__);
+		return -ENODATA;
+	}
+
+	if (keylen != SMB3_GCM128_CRYPTKEY_SIZE) { /* 16 bytes, for AES-GMAC */
+		cifs_dbg(FYI, "%s: invalid key size '%u'\n", __func__, keylen);
+		return -EINVAL;
+	}
+
+	rc = crypto_aead_setkey(tfm, key, keylen);
+	if (rc) {
+		cifs_dbg(VFS, "%s: Failed to set AEAD key, rc=%d\n", __func__, rc);
+		return rc;
+	}
+
+	rc = crypto_aead_setauthsize(tfm, SMB2_SIGNATURE_SIZE);
+	if (rc) {
+		cifs_dbg(VFS, "%s: Failed to set AEAD authsize, rc=%d\n",
+			 __func__, rc);
+		return rc;
+	}
+
+	aead_req = aead_request_alloc(tfm, GFP_KERNEL);
+	if (!aead_req) {
+		cifs_dbg(VFS, "%s: Failed to alloc AEAD request\n", __func__);
+		return -ENOMEM;
+	}
+
+	sg = init_sg_gmac(num_rqst, rqst, sig);
+	if (IS_ERR(sg)) {
+		rc = PTR_ERR(sg);
+		cifs_dbg(VFS, "%s: Failed to init SG, rc=%d\n", __func__, rc);
+
+		/* if -EIO, sg has been allocated */
+		if (rc == -EIO)
+			goto out_free_sg;
+
+		goto out_free_req;
+	}
+
+	aead_request_set_crypt(aead_req, sg, sg, 0, iv);
+	aead_request_set_ad(aead_req, assoclen);
+	aead_request_set_callback(aead_req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+				  crypto_req_done, &wait);
+
+	/*
+	 * Note for AES-GMAC (@sign_only): whether signing or verifying a signature, we must
+	 * always use the encrypt function, as AES-GCM decrypt will internally try to match the
+	 * authentication codes, which were computed based on the ciphertext, and fail (-EBADMSG),
+	 * as expected.
+	 */
+	rc = crypto_wait_req(crypto_aead_encrypt(aead_req), &wait);
+	if (!rc) {
+		memcpy(&shdr->Signature, sig, SMB2_SIGNATURE_SIZE);
+	}
+
+out_free_sg:
+	kfree(sg);
+out_free_req:
+	kfree(aead_req);
+
+	return rc;
+}
+
+/**
+ * smb311_calc_aes_gmac() - Calculate the signature for a request using AES-GMAC algorithm.
+ *
+ * @rqst: SMB2 request to be signed.
+ * @server: Server pointer that holds the secmech to be used.
+ * @verify: If true, compute the nonce considering it came from the server.
+ *
+ * This function implements AES-GMAC signing for SMB2 messages as described in MS-SMB2
+ * specification.  This algorithm is only supported on SMB 3.1.1.
+ *
+ * For our purposes, AES-GMAC is AES-128-GCM, but without encrypting anything.  IOW, this is what's
+ * done:
+ * - set an Additional Authenticated Data (AAD) buffer, with the contents of the SMB2 request,
+ *   starting from the SMB2 header, and the length of rq_nvec + rq_npages
+ * - set plaintext buffer to have a 0 length, so AES-GCM will not encrypt anything
+ * - set a signature buffer, where AES-GCM will place the signature computed from the AAD buffer
+ *
+ * Most of that is done in smb311_crypt_sign().
+ *
+ * Note: even though Microsoft mentions RFC4543 in MS-SMB2, the mechanism used _must_ be the "raw"
+ * AES-128-GCM. RFC4543 is designed for IPsec Encapsulating Security Payload (ESP) and
+ * Authentication Header (AH).  Trying to use "rfc(gcm(aes)))" as the AEAD algorithm will fail the
+ * signature calculation.
+ *
+ * References:
+ * MS-SMB2 3.1.4.1 "Signing An Outgoing Message"
+ *
+ * Return: 0 on success, negative errno otherwise.
+ */
+int smb311_calc_aes_gmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
+			 bool verify)
+{
+	union {
+		struct {
+			/* for MessageId (8 bytes) */
+			__le64 mid;
+			/* for role (client or server) and if SMB2 CANCEL (4 bytes) */
+			__le32 role;
+			__le32 __pad;
+		};
+		u8 buffer[16];
+	} __packed nonce:
+	u8 key[SMB3_SIGN_KEY_SIZE] = { 0 };
+	struct crypto_aead *tfm = NULL;
+	struct smb2_hdr *shdr;
+	unsigned int assoclen;
+	u8 *nonce = NULL;
+	int rc = 0;
+
+	/* allocated in decode_signing_ctx() */
+	tfm = server->secmech.aes_gmac;
+
+	/* sanity check -- shouldn't happen */
+	if (unlikely(!tfm)) {
+		cifs_server_dbg(FYI, "%s: AES-GMAC TFM (%s) is NULL\n", __func__,
+				verify ? "verify" : "sign");
+		return -EIO;
+	}
+
+	shdr = (struct smb2_hdr *)rqst->rq_iov[0].iov_base;
+	memset(shdr->Signature, 0, SMB2_SIGNATURE_SIZE);
+
+	rc = smb2_get_sign_key(le64_to_cpu(shdr->SessionId), server, key);
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Could not get AES-GMAC signing key, rc=%d\n", __func__,
+				rc);
+		goto out;
+	}
+
+	memset(&nonce, 0, SMB3_AES_GCM_NONCE);
+
+	/* note that nonce must always be little endian */
+	nonce.mid = shdr->MessageId;
+
+	/* request is coming from the server, set LSB */
+	if (is_server)
+		nonce.role |= cpu_to_le32(1);
+
+	/* set penultimate LSB if SMB2_CANCEL command */
+	if (shdr->Command == SMB2_CANCEL)
+		nonce.role |= cpu_to_le32(1UL << 1);
+
+	/*
+	 * Use 0 for cryptlen because we're not interested in encrypting, but only computing the
+	 * authentication tag (signature) of the AAD buffer.
+	 */
+	rc = smb311_gmac_sign(rqst, 1, tfm, key, SMB3_SIGN_KEY_SIZE, nonce.buffer);
+	if (rc)
+		cifs_server_dbg(VFS, "%s: Failed to compute AES-GMAC signature for request, rc=%d\n",
+				__func__, rc);
+out:
+	return rc;
+}
+
 /* must be called with server->srv_mutex held */
 static int
 smb2_sign_rqst(struct smb_rqst *rqst, struct TCP_Server_Info *server)
@@ -668,6 +985,8 @@ smb2_verify_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
 	if ((shdr->Command == SMB2_NEGOTIATE) ||
 	    (shdr->Command == SMB2_SESSION_SETUP) ||
 	    (shdr->Command == SMB2_OPLOCK_BREAK) ||
+	    (shdr->MessageId == U64_MAX) || /* MS-SMB2 3.2.5.1.3 */
+	    (shdr->Status == STATUS_PENDING) || /* MS-SMB2 3.2.5.1.3 */
 	    server->ignore_signature ||
 	    (!server->session_estab))
 		return 0;
@@ -828,9 +1147,13 @@ smb2_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 		int rc;
 
 		rc = smb2_verify_signature(&rqst, server);
-		if (rc)
-			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
-				 rc);
+		if (rc) {
+			struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
+
+			cifs_server_dbg(VFS, "SMB signature verification for MessageId 0x%llx "
+					     "(Command 0x%x) failed, rc=%d\n",
+					     shdr->MessageId, shdr->Command, rc);
+		}
 	}
 
 	return map_smb2_to_linux_error(mid->resp_buf, log_error);
@@ -843,7 +1166,23 @@ smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 	int rc;
 	struct smb2_hdr *shdr =
 			(struct smb2_hdr *)rqst->rq_iov[0].iov_base;
+	struct smb2_transform_hdr *trhdr =
+			(struct smb2_transform_hdr *)rqst->rq_iov[0].iov_base;
 	struct mid_q_entry *mid;
+	bool is_encrypted;
+
+	/*
+	 * Client must not sign the request is encrypted.
+	 *
+	 * Note: we can't rely on SMB2_SESSION_FLAG_ENCRYPT_DATA or
+	 * SMB2_GLOBAL_CAP_ENCRYPTION here because they might be set, but not
+	 * being actively used (e.g. not mounted with "seal"). So we just check
+	 * if the request header is a transform header.
+	 *
+	 * References:
+	 * MS-SMB2 3.2.4.1.1
+	 */
+	is_encrypted = (trhdr->ProtocolId == SMB2_TRANSFORM_PROTO_NUM);
 
 	smb2_seq_num_into_buf(server, shdr);
 
@@ -853,11 +1192,13 @@ smb2_setup_request(struct cifs_ses *ses, struct TCP_Server_Info *server,
 		return ERR_PTR(rc);
 	}
 
-	rc = smb2_sign_rqst(rqst, server);
-	if (rc) {
-		revert_current_mid_from_hdr(server, shdr);
-		delete_mid(mid);
-		return ERR_PTR(rc);
+	if (!is_encrypted) {
+		rc = smb2_sign_rqst(rqst, server);
+		if (rc) {
+			revert_current_mid_from_hdr(server, shdr);
+			delete_mid(mid);
+			return ERR_PTR(rc);
+		}
 	}
 
 	return mid;
@@ -897,6 +1238,31 @@ smb2_setup_async_request(struct TCP_Server_Info *server, struct smb_rqst *rqst)
 	return mid;
 }
 
+int smb311_aes_gmac_alloc(struct crypto_aead **tfm)
+{
+	int rc = 0;
+
+	if (!tfm)
+		return -EIO;
+
+	/*
+	 * This is unlikely as we only call this once per TCP session in
+	 * decode_signing_ctx().
+	 */
+	if (unlikely(*tfm))
+		return rc;
+
+	*tfm = crypto_alloc_aead("gcm(aes)", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(*tfm)) {
+		rc = PTR_ERR(*tfm);
+
+		cifs_dbg(VFS, "%s: Failed to alloc AES-GMAC AEAD, rc=%d\n", __func__, rc);
+		*tfm = NULL;
+	}
+
+	return rc;
+}
+
 int
 smb3_crypto_aead_allocate(struct TCP_Server_Info *server)
 {
@@ -934,3 +1300,91 @@ smb3_crypto_aead_allocate(struct TCP_Server_Info *server)
 
 	return 0;
 }
+#if 0
+int
+smb3_calc_aes_gmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
+		   bool allocate_crypto)
+{
+	int rc;
+#define SMB3_GMACAES_SIZE SMB2_CMACAES_SIZE
+	unsigned char smb3_signature[SMB2_GMACAES_SIZE];
+	unsigned char *sigptr = smb3_signature;
+	struct kvec *iov = rqst->rq_iov;
+	struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
+	struct smb_rqst drqst;
+	u8 key[SMB3_SIGN_KEY_SIZE] = { 0 };
+	struct crypto_aead *tfm = NULL;
+	union {
+		struct {
+			/* for MessageId (8 bytes) */
+			__le64 mid;
+			/* for role (client or server) and if SMB2 CANCEL (4 bytes) */
+			__le32 role;
+			__le32 __pad;
+		};
+		u8 buffer[16];
+	} __packed nonce:
+
+	rc = smb2_get_sign_key(le64_to_cpu(shdr->SessionId), server, key);
+	if (rc) {
+		cifs_server_dbg(VFS, "%s: Could not get AES-GMAC signing key, rc=%d\n", __func__,
+				rc);
+		goto out;
+	}
+
+	/* allocated in decode_signing_ctx() */
+	tfm = server->secmech.aes_gmac;
+
+	/* sanity check -- shouldn't happen */
+	if (unlikely(!tfm)) {
+		cifs_server_dbg(FYI, "%s: AES-GMAC TFM (%s) is NULL\n", __func__,
+				verify ? "verify" : "sign");
+		return -EIO;
+	}
+
+	memset(&nonce, 0, SMB3_AES_GCM_NONCE);
+
+	/* note that nonce must always be little endian */
+	nonce.mid = shdr->MessageId;
+
+	/* request is coming from the server, set LSB */
+	if (is_server)
+		nonce.role |= cpu_to_le32(1);
+
+	/* set penultimate LSB if SMB2_CANCEL command */
+	if (shdr->Command == SMB2_CANCEL)
+		nonce.role |= cpu_to_le32(1UL << 1);
+
+	memset(smb3_signature, 0x0, SMB2_CMACAES_SIZE);
+	memset(shdr->Signature, 0x0, SMB2_SIGNATURE_SIZE);
+
+	/*
+	 * For SMB2+, __cifs_calc_signature() expects to sign only the actual
+	 * data, that is, iov[0] should not contain a rfc1002 length.
+	 *
+	 * Sign the rfc1002 length prior to passing the data (iov[1-N]) down to
+	 * __cifs_calc_signature().
+	 */
+	drqst = *rqst;
+	if (drqst.rq_nvec >= 2 && iov[0].iov_len == 4) {
+		rc = crypto_shash_update(shash, iov[0].iov_base,
+					 iov[0].iov_len);
+		if (rc) {
+			cifs_server_dbg(VFS, "%s: Could not update with payload\n",
+				 __func__);
+			goto out;
+		}
+		drqst.rq_iov++;
+		drqst.rq_nvec--;
+	}
+
+	rc = __cifs_calc_signature(&drqst, server, sigptr, shash);
+	if (!rc)
+		memcpy(shdr->Signature, sigptr, SMB2_SIGNATURE_SIZE);
+
+out:
+	if (allocate_crypto)
+		cifs_free_hash(&hash, &sdesc);
+	return rc;
+}
+#endif

@@ -171,6 +171,7 @@ struct cifs_secmech {
 	struct sdesc *sdeschmacsha256;  /* ctxt to generate smb2 signature */
 	struct sdesc *sdesccmacaes;  /* ctxt to generate smb3 signature */
 	struct sdesc *sdescsha512; /* ctxt to generate smb3.11 signing key */
+	struct crypto_aead *aes_gmac; /* for SMB 3.1.1 signatures */
 	struct crypto_aead *ccmaesencrypt; /* smb3 encryption aead */
 	struct crypto_aead *ccmaesdecrypt; /* smb3 decryption aead */
 };
@@ -704,7 +705,13 @@ struct TCP_Server_Info {
 	unsigned int	max_write;
 	unsigned int	min_offload;
 	__le16	compress_algorithm;
-	__u16	signing_algorithm;
+	/*
+	 * algorithm to be used to sign messages:
+	 *   SMB 2.x - HMAC-SHA256 (unsupported in SMB 3.1.1)
+	 *   SMB 3.0.x - AES-CMAC
+	 *   SMB 3.1.1 - AES-GMAC, if server negotiated it, or AES-CMAC otherwise
+	 */
+	__u16 signing_algorithm;
 	__le16	cipher_type;
 	 /* save initital negprot hash */
 	__u8	preauth_sha_hash[SMB2_PREAUTH_HASH_SIZE];

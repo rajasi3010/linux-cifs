@@ -458,6 +458,9 @@ cifs_ses_add_channel(struct cifs_sb_info *cifs_sb, struct cifs_ses *ses,
 	 * We need to allocate the server crypto now as we will need
 	 * to sign packets before we generate the channel signing key
 	 * (we sign with the session key)
+	 *
+	 * AES-GMAC TFM is allocated in decode_signing_ctx() call, when
+	 * we know that AES-GMAC has been negotiated with the server.
 	 */
 	rc = smb311_crypto_shash_allocate(chan->server);
 	if (rc) {
