@@ -711,6 +711,13 @@ static struct scatterlist *init_sg_gmac(int num_rqst, struct smb_rqst *rqst, u8 
 
 		for (j = 0; j < rqst[i].rq_npages; j++) {
 			unsigned int len, offset;
+
+			rqst_page_get_length(&rqst[i], j, &len, &offset);
+			sg_set_page(&sg[idx++], rqst[i].rq_pages[j], len, offset);
+		}
+#if 0
+		for (j = 0; j < rqst[i].rq_npages; j++) {
+			unsigned int len, offset;
 			void *kaddr = NULL;
 
 			rqst_page_get_length(&rqst[i], j, &len, &offset);
@@ -724,6 +731,7 @@ static struct scatterlist *init_sg_gmac(int num_rqst, struct smb_rqst *rqst, u8 
 
 			kunmap(rqst->rq_pages[i]);
 		}
+#endif
 	}
 
 	/* initialize signature buffer */
