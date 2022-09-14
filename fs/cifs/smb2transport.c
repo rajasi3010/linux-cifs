@@ -621,6 +621,23 @@ out:
 	return rc;
 }
 
+/* We can not use the normal sg_set_buf() as we will sometimes pass a
+ * stack object as buf.
+ */
+static inline void smb2_sg_set_buf(struct scatterlist *sg, const void *buf,
+				   unsigned int buflen)
+{
+	void *addr;
+	/*
+	 * VMAP_STACK (at least) puts stack into the vmalloc address space
+	 */
+	if (is_vmalloc_addr(buf))
+		addr = vmalloc_to_page(buf);
+	else
+		addr = virt_to_page(buf);
+	sg_set_page(sg, addr, buflen, offset_in_page(buf));
+}
+
 /*
  * Initialize a scatterlist for encrypt/decrypt/sign (AES-GMAC) operations
  *
@@ -748,13 +765,13 @@ static struct scatterlist *init_sg_gmac(int num_rqst, struct smb_rqst *rqst, u8 
  * Return: 0 on success, negative errno otherwise.
  */
 static int smb311_gmac_sign(struct smb_rqst *rqst, int num_rqst,
+			    unsigned long assoclen,
 			    struct crypto_aead *tfm,
 			    const u8 *key, unsigned int keylen,
 			    u8 *iv)
 {
 	struct smb2_hdr *shdr = (struct smb2_hdr *)rqst[0].rq_iov[0].iov_base;
 	u8 sig[SMB2_SIGNATURE_SIZE] = { 0 };
-	unsigned long assoclen;
 	struct aead_request *aead_req;
 	DECLARE_CRYPTO_WAIT(wait);
 	struct scatterlist *sg;
@@ -778,7 +795,6 @@ static int smb311_gmac_sign(struct smb_rqst *rqst, int num_rqst,
 	 * Set the Additional Authenticated Data (AAD)/Associated Data (AD) length to the SMB
 	 * request length, which corresponds to the part of the buffer we want to sign/authenticate.
 	 */
-	assoclen = smb_rqst_len(server, rqst);
 	if (unlikely(assoclen == 0)) {
 		cifs_dbg(FYI, "%s: assoclen is 0 for signing operation\n", __func__);
 		return -ENODATA;
@@ -885,12 +901,11 @@ int smb311_calc_aes_gmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
 			__le32 __pad;
 		};
 		u8 buffer[16];
-	} __packed nonce:
+	} __packed nonce;
 	u8 key[SMB3_SIGN_KEY_SIZE] = { 0 };
 	struct crypto_aead *tfm = NULL;
 	struct smb2_hdr *shdr;
-	unsigned int assoclen;
-	u8 *nonce = NULL;
+	unsigned long assoclen;
 	int rc = 0;
 
 	/* allocated in decode_signing_ctx() */
@@ -919,18 +934,19 @@ int smb311_calc_aes_gmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
 	nonce.mid = shdr->MessageId;
 
 	/* request is coming from the server, set LSB */
-	if (is_server)
-		nonce.role |= cpu_to_le32(1);
+	nonce.role |= shdr->Flags & cpu_to_le32(1);
 
 	/* set penultimate LSB if SMB2_CANCEL command */
 	if (shdr->Command == SMB2_CANCEL)
 		nonce.role |= cpu_to_le32(1UL << 1);
 
+	assoclen = smb_rqst_len(server, rqst);
+
 	/*
 	 * Use 0 for cryptlen because we're not interested in encrypting, but only computing the
 	 * authentication tag (signature) of the AAD buffer.
 	 */
-	rc = smb311_gmac_sign(rqst, 1, tfm, key, SMB3_SIGN_KEY_SIZE, nonce.buffer);
+	rc = smb311_gmac_sign(rqst, 1, assoclen, tfm, key, SMB3_SIGN_KEY_SIZE, nonce.buffer);
 	if (rc)
 		cifs_server_dbg(VFS, "%s: Failed to compute AES-GMAC signature for request, rc=%d\n",
 				__func__, rc);
@@ -1300,91 +1316,3 @@ smb3_crypto_aead_allocate(struct TCP_Server_Info *server)
 
 	return 0;
 }
-#if 0
-int
-smb3_calc_aes_gmac(struct smb_rqst *rqst, struct TCP_Server_Info *server,
-		   bool allocate_crypto)
-{
-	int rc;
-#define SMB3_GMACAES_SIZE SMB2_CMACAES_SIZE
-	unsigned char smb3_signature[SMB2_GMACAES_SIZE];
-	unsigned char *sigptr = smb3_signature;
-	struct kvec *iov = rqst->rq_iov;
-	struct smb2_hdr *shdr = (struct smb2_hdr *)iov[0].iov_base;
-	struct smb_rqst drqst;
-	u8 key[SMB3_SIGN_KEY_SIZE] = { 0 };
-	struct crypto_aead *tfm = NULL;
-	union {
-		struct {
-			/* for MessageId (8 bytes) */
-			__le64 mid;
-			/* for role (client or server) and if SMB2 CANCEL (4 bytes) */
-			__le32 role;
-			__le32 __pad;
-		};
-		u8 buffer[16];
-	} __packed nonce:
-
-	rc = smb2_get_sign_key(le64_to_cpu(shdr->SessionId), server, key);
-	if (rc) {
-		cifs_server_dbg(VFS, "%s: Could not get AES-GMAC signing key, rc=%d\n", __func__,
-				rc);
-		goto out;
-	}
-
-	/* allocated in decode_signing_ctx() */
-	tfm = server->secmech.aes_gmac;
-
-	/* sanity check -- shouldn't happen */
-	if (unlikely(!tfm)) {
-		cifs_server_dbg(FYI, "%s: AES-GMAC TFM (%s) is NULL\n", __func__,
-				verify ? "verify" : "sign");
-		return -EIO;
-	}
-
-	memset(&nonce, 0, SMB3_AES_GCM_NONCE);
-
-	/* note that nonce must always be little endian */
-	nonce.mid = shdr->MessageId;
-
-	/* request is coming from the server, set LSB */
-	if (is_server)
-		nonce.role |= cpu_to_le32(1);
-
-	/* set penultimate LSB if SMB2_CANCEL command */
-	if (shdr->Command == SMB2_CANCEL)
-		nonce.role |= cpu_to_le32(1UL << 1);
-
-	memset(smb3_signature, 0x0, SMB2_CMACAES_SIZE);
-	memset(shdr->Signature, 0x0, SMB2_SIGNATURE_SIZE);
-
-	/*
-	 * For SMB2+, __cifs_calc_signature() expects to sign only the actual
-	 * data, that is, iov[0] should not contain a rfc1002 length.
-	 *
-	 * Sign the rfc1002 length prior to passing the data (iov[1-N]) down to
-	 * __cifs_calc_signature().
-	 */
-	drqst = *rqst;
-	if (drqst.rq_nvec >= 2 && iov[0].iov_len == 4) {
-		rc = crypto_shash_update(shash, iov[0].iov_base,
-					 iov[0].iov_len);
-		if (rc) {
-			cifs_server_dbg(VFS, "%s: Could not update with payload\n",
-				 __func__);
-			goto out;
-		}
-		drqst.rq_iov++;
-		drqst.rq_nvec--;
-	}
-
-	rc = __cifs_calc_signature(&drqst, server, sigptr, shash);
-	if (!rc)
-		memcpy(shdr->Signature, sigptr, SMB2_SIGNATURE_SIZE);
-
-out:
-	if (allocate_crypto)
-		cifs_free_hash(&hash, &sdesc);
-	return rc;
-}
-#endif
