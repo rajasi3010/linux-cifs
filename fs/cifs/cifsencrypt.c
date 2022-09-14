@@ -743,11 +743,6 @@ cifs_crypto_secmech_release(struct TCP_Server_Info *server)
 		server->secmech.hmacmd5 = NULL;
 	}
 
-	if (server->secmech.aes_gmac) {
-		crypto_free_aead(server->secmech.aes_gmac);
-		server->secmech.aes_gmac = NULL;
-	}
-
 	if (server->secmech.ccmaesencrypt) {
 		crypto_free_aead(server->secmech.ccmaesencrypt);
 		server->secmech.ccmaesencrypt = NULL;
