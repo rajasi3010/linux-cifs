@@ -1027,6 +1027,19 @@ struct TCP_Server_Info *cifs_pick_channel(struct cifs_ses *ses)
 			continue;
 
 		/*
+		 * do not pick a channel that's not healthy.
+		 * if all channels are unhealthy, we'll use
+		 * the primary channel
+		 */
+		spin_lock(&server->srv_lock);
+		if (server->tcpStatus != CifsNew &&
+		    server->tcpStatus != CifsGood) {
+			spin_unlock(&server->srv_lock);
+			continue;
+		}
+		spin_unlock(&server->srv_lock);
+
+		/*
 		 * strictly speaking, we should pick up req_lock to read
 		 * server->in_flight. But it shouldn't matter much here if we
 		 * race while reading this data. The worst that can happen is
