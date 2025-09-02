@@ -214,6 +214,38 @@ skip_terminate:
 	return 0;
 }
 
+/* helper function for code reuse */
+int cifs_chan_skip_or_disable_helper(struct cifs_ses *ses, struct TCP_Server_Info *server, bool from_reconnect, unsigned int max_channels)
+{
+    int rc;
+
+    // Set scaling flag
+    spin_lock(&ses->ses_lock);
+    if (ses->flags & CIFS_SES_FLAG_SCALE_CHANNELS) {
+        spin_unlock(&ses->ses_lock);
+        mutex_unlock(&ses->session_mutex);
+        return 0;
+    }
+    ses->flags |= CIFS_SES_FLAG_SCALE_CHANNELS;
+    spin_unlock(&ses->ses_lock);
+
+	if (max_channels == 1)
+        rc = cifs_chan_skip_or_disable(ses, server, from_reconnect);
+    else
+        rc = cifs_decrease_secondary_channels(ses, max_channels);
+
+    // Error handling
+    if (rc)
+        cifs_dbg(VFS, "Failed to disable extra channels: rc=%d\n", rc);
+
+    // Clear scaling flag
+    spin_lock(&ses->ses_lock);
+    ses->flags &= ~CIFS_SES_FLAG_SCALE_CHANNELS;
+    spin_unlock(&ses->ses_lock);
+
+    return rc;
+}
+
 static int
 smb2_reconnect(__le16 smb2_command, struct cifs_tcon *tcon,
 	       struct TCP_Server_Info *server, bool from_reconnect)

@@ -1025,13 +1025,100 @@ static int smb3_reconfigure(struct fs_context *fc)
 	char *new_password = NULL, *new_password2 = NULL;
 	bool need_recon = false;
 	int rc;
+	bool multichannel_changed = (ctx->multichannel != cifs_sb->ctx->multichannel);
+	bool max_channels_changed = (ctx->max_channels != cifs_sb->ctx->max_channels);
 
 	if (ses->expired_pwd)
 		need_recon = true;
 
+	cifs_info("Debug: smb3_reconfigure called with new multichannel=%d, new max_channels=%d,old multichannel=%d, old max_channels=%d, channel_count=%d, chan_max=%d\n",
+          ctx->multichannel, ctx->max_channels,cifs_sb->ctx->multichannel, cifs_sb->ctx->max_channels, ses->chan_count, ses->chan_max);
+
 	rc = smb3_verify_reconfigure_ctx(fc, ctx, cifs_sb->ctx, need_recon);
 	if (rc)
 		return rc;
+
+	if (multichannel_changed || max_channels_changed) {
+		cifs_info("Reconfiguring multichannel: old multichannel=%d, new multichannel=%d, old max_channels=%d, new max_channels=%d\n",
+				cifs_sb->ctx->multichannel, ctx->multichannel,
+				cifs_sb->ctx->max_channels, ctx->max_channels);
+
+		bool channel_increased = (ctx->max_channels > cifs_sb->ctx->max_channels);
+		bool channel_decreased = (ctx->max_channels < cifs_sb->ctx->max_channels);
+
+		// Update the context
+		cifs_sb->ctx->multichannel = ctx->multichannel;
+		cifs_sb->ctx->max_channels = ctx->max_channels;
+		
+		spin_lock(&ses->chan_lock);
+		ses->chan_max = ctx->max_channels;
+		spin_unlock(&ses->chan_lock);
+
+		if (!ctx->multichannel) {
+			// Disable multichannel: keep only the primary channel
+            cifs_chan_skip_or_disable_helper(ses, ses->server, false, 1);
+
+		} else if (channel_increased) {
+			// Lock session scaling flag
+			spin_lock(&ses->ses_lock);
+			if (ses->flags & CIFS_SES_FLAG_SCALE_CHANNELS) {
+				spin_unlock(&ses->ses_lock);
+				// Already scaling, skip
+				return 0;
+			}
+			ses->flags |= CIFS_SES_FLAG_SCALE_CHANNELS;
+			spin_unlock(&ses->ses_lock);
+
+			if ((ses->server->capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL) &&
+				ses->server->ops->query_server_interfaces) {
+				int xid = get_xid();
+				int rc = 0;
+
+				ses->flags |= CIFS_SES_FLAGS_PENDING_QUERY_INTERFACES;
+				rc = ses->server->ops->query_server_interfaces(xid, cifs_sb_master_tcon(cifs_sb), false);
+				free_xid(xid);
+				ses->flags &= ~CIFS_SES_FLAGS_PENDING_QUERY_INTERFACES;
+
+				// Queue polling for interface changes if not IPC/dummy
+				if (!ses->tcon_ipc && !cifs_sb_master_tcon(cifs_sb)->dummy)
+					queue_delayed_work(cifsiod_wq, &cifs_sb_master_tcon(cifs_sb)->query_interfaces,
+									(SMB_INTERFACE_POLL_INTERVAL * HZ));
+
+				if (rc == -EOPNOTSUPP && ses->chan_count > 1) {
+					// Server no longer supports multichannel, disable extra channels
+					cifs_chan_skip_or_disable_helper(ses, ses->server, false,1);
+				} else if (rc) {
+					cifs_dbg(VFS, "%s: failed to query server interfaces: %d\n", __func__, rc);
+				}
+
+				// Only try to add channels if possible
+				if (ses->chan_max > ses->chan_count && ses->iface_count) {
+					struct TCP_Server_Info *server = ses->server;
+					if (ses->chan_count == 1)
+						cifs_server_dbg(VFS, "supports multichannel now\n");
+					cifs_try_adding_channels(ses);
+				}
+			} else {
+				// If no query_server_interfaces, just try to add channels if possible
+				if (ses->chan_max > ses->chan_count && ses->iface_count) {
+					cifs_try_adding_channels(ses);
+				}
+			}
+
+			// Clear scaling flag
+			spin_lock(&ses->ses_lock);
+			ses->flags &= ~CIFS_SES_FLAG_SCALE_CHANNELS;
+			spin_unlock(&ses->ses_lock);
+
+		} 
+		else if (channel_decreased) {
+			// Decrease max_channels: remove extra channels
+			cifs_chan_skip_or_disable_helper(ses, ses->server, false, ctx->max_channels);
+		}
+	}
+
+	cifs_info("Debug: smb3_reconfigure called with new multichannel=%d, new max_channels=%d,old multichannel=%d, old max_channels=%d, channel_count=%d, chan_max=%d\n",
+          ctx->multichannel, ctx->max_channels,cifs_sb->ctx->multichannel, cifs_sb->ctx->max_channels, ses->chan_count, ses->chan_max);
 
 	/*
 	 * We can not change UNC/username/password/domainname/

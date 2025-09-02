@@ -322,6 +322,62 @@ done:
 	spin_unlock(&ses->chan_lock);
 }
 
+/*
+ * Disable secondary channels so that only max_channels remain (starting from the end).
+ * Leaves the primary channel (index 0) and the first (max_channels-1) secondaries.
+ */
+int cifs_decrease_secondary_channels(struct cifs_ses *ses, unsigned int max_channels)
+{
+	int i;
+	struct TCP_Server_Info *server;
+	struct cifs_server_iface *iface;
+
+	if (!ses) {
+		cifs_dbg(VFS, "cifs_decrease_secondary_channels: ses is NULL\n");
+		return -EINVAL;
+	}
+	if (max_channels < 1) {
+		cifs_dbg(VFS, "cifs_decrease_secondary_channels: max_channels < 1 (%d)\n", max_channels);
+		return -EINVAL;
+	}
+
+	spin_lock(&ses->chan_lock);
+	cifs_dbg(VFS, "Disabling channels above index %d (chan_count=%d)\n", max_channels - 1, ses->chan_count);
+	for (i = ses->chan_count - 1; i >= max_channels; i--) {
+		iface = ses->chans[i].iface;
+		server = ses->chans[i].server;
+		ses->chans[i].iface = NULL;
+		ses->chans[i].server = NULL;
+		cifs_dbg(VFS, "Disabling channel %d: iface=%p, server=%p\n", i, iface, server);
+		spin_unlock(&ses->chan_lock);
+
+		if (iface) {
+			spin_lock(&ses->iface_lock);
+			iface->num_channels--;
+			if (iface->weight_fulfilled)
+				iface->weight_fulfilled--;
+			kref_put(&iface->refcount, release_iface);
+			spin_unlock(&ses->iface_lock);
+		}
+
+		if (server) {
+			if (!server->terminate) {
+				server->terminate = true;
+				cifs_signal_cifsd_for_reconnect(server, false);
+				cifs_dbg(VFS, "Marked server %p for reconnect (channel %d)\n", server, i);
+			}
+			cifs_put_tcp_session(server, false);
+		}
+
+		spin_lock(&ses->chan_lock);
+	}
+	ses->chan_count = max_channels;
+	ses->chans_need_reconnect &= ((1UL << max_channels) - 1);
+	cifs_dbg(VFS, "Channel reduction complete. New chan_count=%d, chans_need_reconnect=0x%lx\n", ses->chan_count, ses->chans_need_reconnect);
+	spin_unlock(&ses->chan_lock);
+	return 0;
+}
+
 /* update the iface for the channel if necessary. */
 void
 cifs_chan_update_iface(struct cifs_ses *ses, struct TCP_Server_Info *server)

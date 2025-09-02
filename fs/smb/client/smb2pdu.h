@@ -420,6 +420,11 @@ struct smb2_create_ea_ctx {
 	struct smb2_file_full_ea_info ea;
 } __packed;
 
+struct cifs_ses;
+struct TCP_Server_Info;
+
+int cifs_chan_skip_or_disable_helper(struct cifs_ses *ses, struct TCP_Server_Info *server, bool from_reconnect, unsigned int max_channels);
+
 #define SMB2_WSL_XATTR_UID		"$LXUID"
 #define SMB2_WSL_XATTR_GID		"$LXGID"
 #define SMB2_WSL_XATTR_MODE		"$LXMOD"
