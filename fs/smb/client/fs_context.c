@@ -1820,6 +1820,10 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		goto cifs_parse_mount_err;
 	}
 
+	//if max-channels=1 then multichannel is false
+	if (ctx->multichannel && ctx->max_channels == 1)
+    ctx->multichannel = false;
+
 	return 0;
 
  cifs_parse_mount_err:
