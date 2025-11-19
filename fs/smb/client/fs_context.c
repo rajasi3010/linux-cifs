@@ -1113,6 +1113,21 @@ static int smb3_reconfigure(struct fs_context *fc)
 	}
 
 	/*
+     * Update noblocksnd on the server if it has changed.
+     * This affects whether MSG_DONTWAIT is used in send/receive operations.
+     */
+    if (ctx->noblocksnd != cifs_sb->ctx->noblocksnd) {
+		struct TCP_Server_Info *server = ses->server;
+		bool new_noblocksnd = ctx->noblocksnd || ctx->rootfs;
+
+		spin_lock(&server->srv_lock);
+		server->noblocksnd = new_noblocksnd;
+		spin_unlock(&server->srv_lock);
+
+		cifs_dbg(FYI, "noblocksnd updated to %d during remount\n", new_noblocksnd);
+	}
+
+	/*
 	 * If multichannel or max_channels has changed, update the session's channels accordingly.
 	 * This may add or remove channels to match the new configuration.
 	 */
