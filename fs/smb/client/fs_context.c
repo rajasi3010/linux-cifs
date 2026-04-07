@@ -1317,6 +1317,7 @@ static void smb3_sync_tcon_opts(struct cifs_sb_info *cifs_sb,
 
 		spin_lock(&tcon->tc_lock);
 		tcon->retry = ctx->retry;
+		tcon->no_lease = ctx->no_lease;
 		/*
 		 * Note: this updates the limit for new cached dir opens
 		 * but does not resize or evict existing cached dirents.
@@ -1325,6 +1326,14 @@ static void smb3_sync_tcon_opts(struct cifs_sb_info *cifs_sb,
 		spin_unlock(&tcon->tc_lock);
 	}
 	spin_unlock(&cifs_sb->tlink_tree_lock);
+
+	/*
+	 * When switching to nolease, close all deferred file handles.
+	 * cifs_close_all_deferred_files_sb() handles its own locking
+	 * and must be called outside tlink_tree_lock since it can sleep.
+	 */
+	if (ctx->no_lease)
+		cifs_close_all_deferred_files_sb(cifs_sb);
 }
 
 /*
