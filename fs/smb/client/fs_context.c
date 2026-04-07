@@ -1372,6 +1372,7 @@ static void smb3_sync_tcon_opts(struct cifs_sb_info *cifs_sb,
 		spin_lock(&tcon->tc_lock);
 		tcon->retry = ctx->retry;
 		tcon->nodelete = ctx->nodelete;
+		tcon->no_lease = ctx->no_lease;
 		tcon->broken_sparse_sup = ctx->no_sparse;
 		tcon->max_cached_dirs = ctx->max_cached_dirs;
 		tcon->handle_timeout = ctx->handle_timeout;
