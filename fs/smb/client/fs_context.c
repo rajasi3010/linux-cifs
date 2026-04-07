@@ -1206,6 +1206,18 @@ static int smb3_verify_reconfigure_ctx(struct fs_context *fc,
 		cifs_errorf(fc, "can not change rdma during remount\n");
 		return -EINVAL;
 	}
+	/* init default: cache_ro = false */
+	if (new_ctx->cache_ro &&
+	    new_ctx->cache_ro != old_ctx->cache_ro) {
+		cifs_errorf(fc, "can not change cache=ro during remount\n");
+		return -EINVAL;
+	}
+	/* init default: cache_rw = false */
+	if (new_ctx->cache_rw &&
+	    new_ctx->cache_rw != old_ctx->cache_rw) {
+		cifs_errorf(fc, "can not change cache=singleclient during remount\n");
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -1292,6 +1304,8 @@ static void smb3_preserve_non_reconfig_opts(struct smb3_fs_context *new_ctx,
 	new_ctx->sockopt_tcp_nodelay = old_ctx->sockopt_tcp_nodelay;
 	new_ctx->domainauto = old_ctx->domainauto;
 	new_ctx->rdma = old_ctx->rdma;
+	new_ctx->cache_ro = old_ctx->cache_ro;
+	new_ctx->cache_rw = old_ctx->cache_rw;
 }
 
 #define STEAL_STRING(cifs_sb, ctx, field)				\
